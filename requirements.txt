@@ -1,0 +1,9 @@
+torch
+matplotlib
+numpy
+gsutil
+lpips
+cma
+tqdm
+wget
+pytorch-fid

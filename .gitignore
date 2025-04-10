@@ -1,0 +1,8 @@
+models/
+__pycache__/
+.idea/
+.conda/
+stylegan3/*
+dcgan/
+*.png
+.vscode/
