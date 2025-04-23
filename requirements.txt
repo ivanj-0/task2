@@ -1,9 +1,8 @@
-torch
+torch==2.5.1
 matplotlib
 numpy
-gsutil
 lpips
 cma
 tqdm
-wget
-pytorch-fid
+torchvision
+torcheval

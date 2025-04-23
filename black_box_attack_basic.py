@@ -6,88 +6,91 @@ from pgan import PGANGenerator
 from dcgan import DCGANGenerator
 from utils import save_images
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 
 def black_box_attack(generator, perceptual_loss_model, num_iterations, step_size, device, num_perturbations=10):
-    """
-    Performs a simple black-box optimization attack using batched LPIPS calculation.
-    Tries to maximize the LPIPS distance from the original image at each step.
-    """
-    # Initialize latent vector randomly on the correct device
     z, _ = generator.model.buildNoiseData(1)
     z = z.to(device)
     z.requires_grad_(False)
 
-    # Generate original image from target GAN
-    original_image = generator.generate_image(noise=z).detach()
+    original_image = generator.generate_image(noise=z).detach().to(device)
 
-    pbar = tqdm(range(num_iterations), desc="Basic Attack")
+    history = []
+    pbar = tqdm(range(num_iterations), desc=f"Attack iters={num_iterations}, step={step_size}, perturbs={num_perturbations}")
     for i in pbar:
-        # Sample neighboring latent vectors (perturbations)
         perturbations, _ = generator.model.buildNoiseData(num_perturbations)
         perturbations = perturbations.to(device)
 
-        # Create batch of perturbed latent vectors
-        perturbed_z_batch = z.repeat(num_perturbations, 1) + step_size * perturbations
+        batch_z = z.repeat(num_perturbations, 1) + step_size * perturbations
+        perturbed_images = generator.generate_image(noise=batch_z).detach().to(device)
 
-        # Generate batch of perturbed images
-        perturbed_images_batch = generator.generate_image(noise=perturbed_z_batch).detach()
+        original_batch = original_image.repeat(num_perturbations, 1, 1, 1)
 
-        # Prepare original image batch for comparison
-        original_image_batch = original_image.repeat(num_perturbations, 1, 1, 1)
-
-        # Calculate perceptual distances (LPIPS) for the entire batch
         with torch.no_grad():
-            dists = perceptual_loss_model(original_image_batch.to(device), perturbed_images_batch.to(device)).squeeze()
-        
+            dists = perceptual_loss_model(original_batch, perturbed_images).squeeze()
         scores = dists.cpu().numpy()
-
-        # Select perturbation direction that MAXIMIZES LPIPS score
         best_idx = np.argmax(scores)
-        best_direction = perturbations[best_idx:best_idx+1] # Keep batch dimension
+        best_score = scores[best_idx]
+        history.append(best_score)
 
-        z = z + step_size * best_direction
-        
-        pbar.set_postfix({
-            "Best LPIPS Score": f"{scores[best_idx]:.4f}"
-        })
+        z = z + step_size * perturbations[best_idx:best_idx+1]
+        pbar.set_postfix({"LPIPS": f"{best_score:.4f}"})
 
-    print("Optimization finished.")
-    attacked_image = generator.generate_image(noise=z).detach()
+    attacked_image = generator.generate_image(noise=z).detach().to(device)
+    return z, original_image, attacked_image, history
 
-    return z, original_image, attacked_image
 
 if __name__ == "__main__":
-    # Determine device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     perceptual_loss = lpips.LPIPS(net='vgg').to(device)
     perceptual_loss.eval()
 
-    # Load the generator model
     generator = DCGANGenerator()
-    print("Generator loaded.")
+    try:
+        generator.model.to(device)
+    except Exception:
+        pass
+    print("Generator loaded and moved to device.")
 
-    # --- Configuration ---
-    NUM_ITERATIONS = 100
-    STEP_SIZE = 0.01
-    NUM_PERTURBATIONS = 20
-    OUTPUT_FILENAME = "attack_comparison_batched.png"
-    # ---------------------
+    configs = [
+        {'iterations': 50,  'step': 0.005, 'perts': 10},
+        {'iterations': 100, 'step': 0.01,  'perts': 20},
+        {'iterations': 200, 'step': 0.02,  'perts': 20},
+    ]
 
-    # Run the attack
-    z_final, original_image, attacked_image = black_box_attack(
-        generator,
-        perceptual_loss,
-        num_iterations=NUM_ITERATIONS,
-        step_size=STEP_SIZE,
-        device=device,
-        num_perturbations=NUM_PERTURBATIONS
-    )
+    all_histories = {}
+    final_scores = {}
 
-    # Save the original and attacked images side-by-side
-    comparison_tensor = torch.cat([original_image.cpu(), attacked_image.cpu()], dim=0)
-    print(f"Saving comparison image to {OUTPUT_FILENAME}...")
-    save_images(comparison_tensor, path=OUTPUT_FILENAME)
-    print("Done.")
+    for cfg in configs:
+        key = f"iters{cfg['iterations']}_step{cfg['step']}_perts{cfg['perts']}"
+        z_fin, orig, att, hist = black_box_attack(
+            generator, perceptual_loss,
+            num_iterations=cfg['iterations'],
+            step_size=cfg['step'],
+            device=device,
+            num_perturbations=cfg['perts']
+        )
+        all_histories[key] = hist
+
+        with torch.no_grad():
+            dist = perceptual_loss(orig, att).item()
+        final_scores[key] = dist
+
+        comp = torch.cat([orig.cpu(), att.cpu()], dim=0)
+        fname = f"attack_{key}.png"
+        save_images(comp, path=fname)
+        print(f"Saved comparison: {fname}")
+
+    plt.figure()
+    for key, hist in all_histories.items():
+        plt.plot(hist, label=key)
+    plt.xlabel('Iteration')
+    plt.ylabel('LPIPS Distance')
+    plt.title('Attack Progression')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('lpips_progression.png')
+    print("Saved plot: lpips_progression.png")
